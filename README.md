@@ -1,72 +1,62 @@
 # Canvas MCP Server
 
-A Model Context Protocol (MCP) server that connects Claude to the Canvas LMS REST API. Once configured, Claude can list your courses, read assignments and announcements, view syllabi, check upcoming deadlines, submit assignments, and manage course files — all from within Claude Code or Claude Desktop.
+Connect Claude to your Canvas LMS. Once set up, Claude can read your courses, assignments, announcements, and syllabi — and even submit assignments and manage files — directly from Claude Desktop or Claude Code.
 
 ---
 
-## Prerequisites
+## What you need
 
-- **Node.js 18+** (check with `node --version`)
-- A **Canvas API access token** for your institution
+- **Node.js 18 or later** — check with `node --version`, download from [nodejs.org](https://nodejs.org) if needed
+- A **Canvas account** at your institution (any school that uses Canvas LMS)
+- **Claude Desktop** or **Claude Code** (VS Code extension)
 
 ---
 
-## Getting a Canvas API Token
+## Step 1 — Get your Canvas API token
 
-1. Log in to Canvas at `https://imsa.instructure.com`
-2. Click your **account icon** in the top-left sidebar
+1. Log in to your institution's Canvas (e.g. `https://yourschool.instructure.com`)
+2. Click your **profile picture / avatar** in the top-left corner
 3. Go to **Settings**
-4. Scroll down to **Approved Integrations** and click **+ New Access Token**
-5. Give it a name (e.g. "Claude MCP") and optionally an expiry date
-6. Click **Generate Token** and copy the token — you won't see it again
+4. Scroll down to **Approved Integrations**
+5. Click **+ New Access Token**
+6. Give it a name like `Claude MCP` and click **Generate Token**
+7. **Copy the token now** — Canvas will never show it again
+
+> Your Canvas URL is the domain your school uses. If you log in at `canvas.university.edu`, that's your base URL.
 
 ---
 
-## Setup
-
-### 1. Install dependencies
+## Step 2 — Install and build
 
 ```bash
+# Clone the repo
+git clone https://github.com/YOUR_USERNAME/canvas-mcp.git
 cd canvas-mcp
+
+# Install dependencies
 npm install
-```
 
-### 2. Configure environment variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and paste your Canvas API token:
-
-```
-CANVAS_API_TOKEN=your_token_here
-CANVAS_BASE_URL=https://imsa.instructure.com
-```
-
-### 3. Build the server
-
-```bash
+# Build
 npm run build
 ```
 
-This compiles TypeScript to `dist/index.js`.
-
-### 4. (Optional) Run in dev mode
-
-```bash
-npm run dev
-```
-
-Uses `tsx` to run without a build step — useful during development.
+That's it. This creates `dist/index.js` which is the server Claude will run.
 
 ---
 
-## Configuring in Claude Code
+## Step 3 — Connect to Claude
 
-### Option A: Project-level config (recommended)
+You need to tell Claude where the server is and give it your token. Pick the client you use:
 
-Create or edit `.claude/mcp.json` in your project root:
+### Claude Desktop
+
+Open (or create) this file:
+```
+~/Library/Application Support/Claude/claude_desktop_config.json        ← Mac
+%APPDATA%\Claude\claude_desktop_config.json                            ← Windows
+```
+
+Add the `mcpServers` block. If the file already has content, merge it in:
 
 ```json
 {
@@ -76,84 +66,99 @@ Create or edit `.claude/mcp.json` in your project root:
       "args": ["/absolute/path/to/canvas-mcp/dist/index.js"],
       "env": {
         "CANVAS_API_TOKEN": "your_token_here",
-        "CANVAS_BASE_URL": "https://imsa.instructure.com"
+        "CANVAS_BASE_URL": "https://yourschool.instructure.com"
       }
     }
   }
 }
 ```
 
-Replace `/absolute/path/to/canvas-mcp` with the actual path on your machine (e.g. `/Users/yourname/canvas-mcp`).
+Replace:
+- `/absolute/path/to/canvas-mcp` → the folder where you cloned this repo (e.g. `/Users/yourname/canvas-mcp`)
+- `your_token_here` → the token you copied in Step 1
+- `https://yourschool.instructure.com` → your institution's Canvas URL
 
-### Option B: Global Claude Code config
+**Quit Claude Desktop fully and reopen it** after saving.
 
-Add the same JSON block to the global MCP config file. Find it by running:
+### Claude Code (VS Code)
 
-```bash
-claude mcp list
+Create or edit `~/.claude/mcp.json` (global, works in all projects):
+
+```json
+{
+  "mcpServers": {
+    "canvas": {
+      "command": "node",
+      "args": ["/absolute/path/to/canvas-mcp/dist/index.js"],
+      "env": {
+        "CANVAS_API_TOKEN": "your_token_here",
+        "CANVAS_BASE_URL": "https://yourschool.instructure.com"
+      }
+    }
+  }
+}
 ```
 
-Or edit it directly at `~/.claude/mcp.json` (create if it doesn't exist).
-
-### Restarting Claude Code
-
-After editing the config, restart Claude Code to pick up the new MCP server:
-
-- In VS Code: Run the **"Claude Code: Restart"** command (`Cmd+Shift+P`)
-- Or quit and reopen Claude Code entirely
-
-### Verifying the connection
-
-Once restarted, ask Claude:
-
-> "List my Canvas courses"
-
-If the server is connected, Claude will use the `list_courses` tool and return your active courses.
+Then restart Claude Code (`Cmd+Shift+P` → "Claude Code: Restart").
 
 ---
 
-## Available Tools
+## Step 4 — Verify it works
 
-| Tool | Description |
-|------|-------------|
-| `list_courses` | List all active courses with IDs, names, codes, and terms |
-| `get_assignments` | Get assignments for a course (with optional past-due filter) |
-| `get_assignment_detail` | Get full details for a single assignment including rubric |
-| `get_announcements` | Get recent announcements for one or all courses |
-| `get_syllabus` | Get the course syllabus as plain text |
-| `submit_assignment` | Submit an assignment via text entry or file upload |
-| `upload_file` | Upload a local file to a course's files area |
-| `download_file` | Download a Canvas file to your local machine |
-| `list_course_files` | List files in a course (optionally filtered by folder) |
-| `get_upcoming_deadlines` | Get sorted upcoming deadlines across all courses |
+Ask Claude:
+
+> "List my Canvas courses"
+
+If everything is connected, Claude will call the `list_courses` tool and return your active courses.
+
+---
+
+## What Claude can do
+
+| Ask Claude to... | Tool used |
+|---|---|
+| "List my courses" | `list_courses` |
+| "What assignments are due this week?" | `get_upcoming_deadlines` |
+| "Show me the assignments for Biology" | `get_assignments` |
+| "What's the rubric for the essay?" | `get_assignment_detail` |
+| "Any new announcements?" | `get_announcements` |
+| "What's the syllabus for CS101?" | `get_syllabus` |
+| "Submit my essay for assignment 456" | `submit_assignment` |
+| "Upload this file to my course" | `upload_file` |
+| "Download file ID 789" | `download_file` |
+| "What files are in my course?" | `list_course_files` |
 
 ---
 
 ## Troubleshooting
 
-**"CANVAS_API_TOKEN environment variable is required"**
-- Make sure your `.env` file exists and contains `CANVAS_API_TOKEN=...`
-- Or set the token directly in the MCP config `env` block
+**Claude doesn't seem to have Canvas tools**
+- Make sure you fully quit and reopened Claude Desktop (not just closed the window)
+- Double-check the path to `dist/index.js` is correct and absolute
+- Make sure you ran `npm run build` — the `dist/` folder must exist
 
-**"Canvas API token may be invalid or expired (401)"**
-- Generate a new token in Canvas → Account → Settings → New Access Token
+**"401 Unauthorized" error**
+- Your token is invalid or expired — generate a new one in Canvas → Settings → Approved Integrations
 
-**"You do not have permission (403)"**
-- The token is valid but doesn't have access to that resource
-- Check if the course is restricted or if your role grants API access
+**"403 Forbidden" error**
+- Your token is valid but doesn't have access to that course or resource
 
-**"The requested Canvas resource was not found (404)"**
-- Double-check the course ID or assignment ID
-- Use `list_courses` to get valid course IDs first
+**"404 Not Found" error**
+- The course ID or assignment ID doesn't exist — use `list_courses` first to get valid IDs
 
-**Rate limited**
-- The client automatically retries with exponential backoff
-- If it persists, wait a minute and try again
+**Wrong Canvas URL**
+- Make sure `CANVAS_BASE_URL` matches your institution exactly (no trailing slash)
+- Example: `https://canvas.university.edu` not `https://canvas.university.edu/`
 
-**Course not appearing in `list_courses`**
-- By default only `active` enrollments are returned
-- Pass `enrollment_state: "current_and_future"` to include upcoming courses
+**Node.js not found**
+- Install Node.js 18+ from [nodejs.org](https://nodejs.org)
+- On Mac with Homebrew: `brew install node`
 
-**TypeScript build errors**
-- Make sure you're using Node.js 18+: `node --version`
-- Run `npm install` again to ensure all dependencies are present
+**"Cannot find module" error**
+- Run `npm install` then `npm run build` again from the `canvas-mcp` directory
+
+---
+
+## Security note
+
+Your API token gives read/write access to your Canvas account. Keep it out of version control. Never paste it into a public place. The `dist/` folder and any `.env` files are excluded from this repo by `.gitignore`.
