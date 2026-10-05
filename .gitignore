@@ -19,3 +19,10 @@ npm-debug.log*
 # Editor
 .vscode/
 .idea/
+
+# Runtime user data and future local event/checkpoint stores
+.canvas-mcp/
+coverage/
+*.tsbuildinfo
+.env.*
+!.env.example
