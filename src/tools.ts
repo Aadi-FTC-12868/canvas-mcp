@@ -1,515 +1,140 @@
-/**
- * MCP tool definitions and handlers for the Canvas LMS MCP server.
- * Each handler calls the CanvasClient and returns structured data.
- */
+import { z } from "zod";
+import { CanvasClient, CanvasError } from "./canvas-client.js";
+import { extractContent, sanitizeResourceUrl, describeLinkedResource } from "./content.js";
+import { getCourseContext } from "./course-context.js";
+import { CourseChangeFeed } from "./change-feed.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { CanvasClient, stripHtml } from "./canvas-client.js";
-import type {
-  CourseItem,
-  AssignmentItem,
-  AssignmentDetail,
-  AnnouncementItem,
-  SyllabusResult,
-  SubmissionResult,
-  FileItem,
-  FileUploadResult,
-  FileDownloadResult,
-  UpcomingDeadlineItem,
-} from "./types.js";
+export const VERSION = "2.0.0-alpha.1";
+export interface ToolContext { client: () => CanvasClient; feed: CourseChangeFeed }
+const id = z.string().regex(/^[1-9]\d*$/, "Use a numeric Canvas ID as a string.");
+const courseInput = z.object({course_id: id}).strict();
+const coursePath = (courseId: string) => "/courses/" + courseId;
+type Row = Record<string, any>;
 
-// ─── Tool Input Schemas (JSON Schema) ─────────────────────────────────────────
-
-export const toolDefinitions = [
-  {
-    name: "list_courses",
-    description:
-      "List all active courses for the current Canvas user, including course ID, name, code, enrollment type, and term.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        enrollment_state: {
-          type: "string",
-          description: 'Filter by enrollment state. Defaults to "active".',
-          enum: ["active", "invited_or_pending", "completed", "current_and_invited", "current_and_future", "current_future_and_concluded"],
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_assignments",
-    description:
-      "Get all assignments for a specific Canvas course, including due dates, descriptions, points, and submission status.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-        include_past_due: {
-          type: "boolean",
-          description: "If true, include assignments whose due date has already passed. Defaults to false.",
-        },
-      },
-      required: ["course_id"],
-    },
-  },
-  {
-    name: "get_assignment_detail",
-    description:
-      "Get full details for a single Canvas assignment, including the description, rubric, submission types, and current submission status.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-        assignment_id: {
-          type: "string",
-          description: "The Canvas assignment ID.",
-        },
-      },
-      required: ["course_id", "assignment_id"],
-    },
-  },
-  {
-    name: "get_announcements",
-    description:
-      "Get recent announcements for one or all active Canvas courses. Returns title, message, posted date, author, and course name.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "Optional course ID. If omitted, fetches announcements across all active courses.",
-        },
-        limit: {
-          type: "number",
-          description: "Maximum number of announcements to return. Defaults to 10.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_syllabus",
-    description:
-      "Get the syllabus for a specific Canvas course as plain text.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-      },
-      required: ["course_id"],
-    },
-  },
-  {
-    name: "submit_assignment",
-    description:
-      "Submit an assignment to Canvas. Supports text entry and file uploads. For file uploads, uses the Canvas three-step upload workflow.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-        assignment_id: {
-          type: "string",
-          description: "The Canvas assignment ID.",
-        },
-        submission_type: {
-          type: "string",
-          enum: ["online_text_entry", "online_upload"],
-          description: 'The submission type: "online_text_entry" for text, "online_upload" for a file.',
-        },
-        body: {
-          type: "string",
-          description: "For text entry submissions: the text content to submit.",
-        },
-        file_path: {
-          type: "string",
-          description: "For file upload submissions: the absolute local path to the file.",
-        },
-      },
-      required: ["course_id", "assignment_id", "submission_type"],
-    },
-  },
-  {
-    name: "upload_file",
-    description:
-      "Upload a file to a Canvas course's files area (not tied to an assignment). Uses the Canvas three-step upload workflow.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-        file_path: {
-          type: "string",
-          description: "The absolute local path to the file to upload.",
-        },
-        folder_path: {
-          type: "string",
-          description: 'Canvas folder path to upload into. Defaults to the root folder (e.g., "my files/subfolder").',
-        },
-      },
-      required: ["course_id", "file_path"],
-    },
-  },
-  {
-    name: "download_file",
-    description:
-      "Download a file from Canvas to the local filesystem by its Canvas file ID.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        file_id: {
-          type: "string",
-          description: "The Canvas file ID to download.",
-        },
-        save_path: {
-          type: "string",
-          description: "Local path to save the file to. If omitted, saves to the current directory with the original filename.",
-        },
-      },
-      required: ["file_id"],
-    },
-  },
-  {
-    name: "list_course_files",
-    description:
-      "List all files available in a Canvas course, optionally filtered to a specific folder.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        course_id: {
-          type: "string",
-          description: "The Canvas course ID.",
-        },
-        folder_path: {
-          type: "string",
-          description: "Optional Canvas folder path to filter to (e.g., \"course files/readings\").",
-        },
-      },
-      required: ["course_id"],
-    },
-  },
-  {
-    name: "get_upcoming_deadlines",
-    description:
-      "Get a consolidated, sorted list of upcoming assignment deadlines across all active Canvas courses.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        days_ahead: {
-          type: "number",
-          description: "How many days into the future to look for deadlines. Defaults to 14.",
-        },
-      },
-      required: [],
-    },
-  },
-] as const;
-
-// ─── Tool Handlers ─────────────────────────────────────────────────────────────
-
-/**
- * List all active Canvas courses for the current user.
- */
-export async function handleListCourses(
-  client: CanvasClient,
-  args: { enrollment_state?: string }
-): Promise<CourseItem[]> {
-  const courses = await client.listCourses(args.enrollment_state ?? "active");
-  return courses.map((c) => ({
-    id: String(c.id),
-    name: c.name,
-    course_code: c.course_code,
-    enrollment_type: c.enrollments?.[0]?.type ?? "unknown",
-    term_name: c.term?.name ?? "Unknown Term",
-  }));
-}
-
-/**
- * Get assignments for a course, with optional past-due filtering.
- */
-export async function handleGetAssignments(
-  client: CanvasClient,
-  args: { course_id: string; include_past_due?: boolean }
-): Promise<AssignmentItem[]> {
-  const assignments = await client.getAssignments(args.course_id);
-  const now = new Date();
-
-  return assignments
-    .filter((a) => {
-      if (args.include_past_due) return true;
-      if (!a.due_at) return true; // No due date = always include
-      return new Date(a.due_at) >= now;
-    })
-    .map((a) => ({
-      id: String(a.id),
-      name: a.name,
-      description: stripHtml(a.description),
-      due_date: a.due_at ?? null,
-      points_possible: a.points_possible,
-      submitted:
-        a.submission?.workflow_state !== undefined &&
-        a.submission.workflow_state !== "unsubmitted",
-      score: a.submission?.score ?? null,
-    }));
-}
-
-/**
- * Get full details for a single assignment.
- */
-export async function handleGetAssignmentDetail(
-  client: CanvasClient,
-  args: { course_id: string; assignment_id: string }
-): Promise<AssignmentDetail> {
-  const a = await client.getAssignmentDetail(args.course_id, args.assignment_id);
-
-  let rubricText = "No rubric.";
-  if (a.rubric && a.rubric.length > 0) {
-    rubricText = a.rubric
-      .map(
-        (c) =>
-          `${c.description} (${c.points} pts): ${c.ratings
-            .map((r) => `${r.description} (${r.points})`)
-            .join(", ")}`
-      )
-      .join("\n");
+function source(client: CanvasClient, path: string) { return client.baseUrl + path; }
+function record(client: CanvasClient, value: Row, url: string, htmlField?: string) {
+  // Never expose short-lived signed download URLs as citations.
+  const result: Row = {};
+  for (const field of ["id", "name", "title", "course_code", "workflow_state", "due_at", "updated_at", "posted_at", "points_possible", "submission_types", "rubric", "submission", "enrollments", "term", "page_id", "url", "type", "content_id", "position", "completion_requirement", "content_details", "display_name", "filename", "size", "content-type", "locked_for_user", "lock_explanation"]) {
+    if (value[field] !== undefined && field !== "url") result[field] = value[field];
   }
-
+  const pick = (input: Row, fields: string[]) => Object.fromEntries(fields.filter(k => input[k] !== undefined).map(k => [k, input[k]]));
+  if (value.submission) result.submission = pick(value.submission, ["id", "workflow_state", "submitted_at", "score", "grade", "late", "missing", "attempt", "submission_type"]);
+  if (value.enrollments) result.enrollments = value.enrollments.map((v: Row) => pick(v, ["type", "role", "enrollment_state"]));
+  if (value.term) result.term = pick(value.term, ["id", "name", "start_at", "end_at"]);
+  if (value.content_details) result.content_details = pick(value.content_details, ["due_at", "unlock_at", "lock_at", "points_possible", "locked_for_user"]);
+  if (value.completion_requirement) result.completion_requirement = pick(value.completion_requirement, ["type", "min_score", "completed"]);
+  if (value.rubric) result.rubric = value.rubric.map((v: Row) => ({...pick(v, ["id", "description", "long_description", "points"]), ratings: v.ratings?.map((r: Row) => pick(r, ["id", "description", "long_description", "points"]))}));
+  result.source_url = url;
+  result.trust = "untrusted_source_content";
+  if (htmlField) {
+    result.content = extractContent(value[htmlField] ?? "", url, client.baseUrl);
+    result.content_status = typeof value[htmlField] === "string" ? "retrieved" : "not_returned";
+    if (result.content_status === "not_returned") result.omission = "The requested body was not returned. This may require another API, permission, or browser access; content has not been read.";
+  }
+  if (htmlField === "description") result.submission_status = value.submission ? "returned" : "not_returned";
+  if (typeof value.page_url === "string") result.page_slug = value.page_url;
+  const resourceUrls = Object.entries(value.content_details ?? {}).filter(([key, raw]) => /(?:url|href)$/i.test(key) && typeof raw === "string");
+  if (typeof value.external_url === "string") {
+    result.external_url = sanitizeResourceUrl(value.external_url, url);
+    resourceUrls.unshift(["external_url", value.external_url]);
+  }
+  if (resourceUrls.length) {
+    result.linked_resources = resourceUrls.slice(0, 20).map(([key, raw]) => describeLinkedResource(String(raw), key, url, client.baseUrl, value.type === "ExternalTool" ? "lti" : undefined)).filter(Boolean);
+    result.link_discovery_complete = resourceUrls.length <= 20 && result.linked_resources.length === resourceUrls.length;
+    if (!result.link_discovery_complete) result.link_omission = "Some linked URLs were unsupported or exceeded the 20-link limit. Open the source page to inspect remaining resources.";
+  }
+  return result;
+}
+export function errorResult(err: unknown) {
+  if (err instanceof z.ZodError) return {code: "invalid_arguments", message: "Invalid tool arguments.", issues: err.issues.map(i => ({path: i.path, message: i.message}))};
+  if (err instanceof CanvasError) return {code: err.code, message: err.message, status: err.status};
+  return {code: "operation_failed", message: "The operation failed. No complete result is available."};
+}
+function define<S extends z.ZodObject>(name: string, description: string, schema: S, handler: (args: z.infer<S>, ctx: ToolContext) => Promise<unknown> | unknown, localState = false) {
   return {
-    id: String(a.id),
-    name: a.name,
-    description: stripHtml(a.description),
-    due_date: a.due_at ?? null,
-    points_possible: a.points_possible,
-    submission_types: a.submission_types,
-    rubric: rubricText,
-    submitted:
-      a.submission?.workflow_state !== undefined &&
-      a.submission.workflow_state !== "unsubmitted",
-    score: a.submission?.score ?? null,
+    name, description, schema,
+    annotations: {readOnlyHint: !localState, destructiveHint: false, idempotentHint: !localState, openWorldHint: false},
+    invoke: async (args: unknown, ctx: ToolContext) => handler(schema.parse(args), ctx)
   };
 }
+export const tools: ReturnType<typeof define>[] = [
+  define("get_profile", "Read the connected Canvas user's identity and school origin. No credentials are returned.", z.object({}).strict(), async (_, ctx) => {
+    const c = ctx.client(); const p = await c.getOne<Row>("/users/self/profile");
+    return {id: String(p.id), name: p.name, display_name: p.short_name, canvas_origin: c.baseUrl, source_url: c.baseUrl + "/profile", trust: "untrusted_source_content"};
+  }),
+  define("list_courses", "List visible courses with enrollment context. Bounded pagination fails explicitly if the list cannot be completed.", z.object({enrollment_state: z.enum(["active", "invited_or_pending", "completed"]).default("active")}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const rows = await c.getAll<Row>("/courses", {enrollment_state: a.enrollment_state, "include[]": ["term", "enrollments"]});
+    return {courses: rows.map(v => record(c, v, source(c, coursePath(String(v.id))))), complete: true};
+  }),
+  define("get_assignments", "Read course assignments, including descriptions with linked-material manifests and the user's submission state.", courseInput.extend({include_past_due: z.boolean().default(true)}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const path = coursePath(a.course_id); const rows = await c.getAll<Row>(path + "/assignments", {"include[]": ["submission"], order_by: "due_at"});
+    return {assignments: rows.filter(v => a.include_past_due || !v.due_at || Date.parse(v.due_at) >= Date.now()).map(v => record(c, v, source(c, path + "/assignments/" + v.id), "description")), complete: true, include_past_due: a.include_past_due};
+  }),
+  define("get_assignment_detail", "Read an assignment, rubric, submission state, and linked-material gaps.", courseInput.extend({assignment_id: id}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const path = coursePath(a.course_id) + "/assignments/" + a.assignment_id;
+    return record(c, await c.getOne<Row>(path, {"include[]": ["submission", "rubric_assessment"]}), source(c, path), "description");
+  }),
+  define("get_syllabus", "Read the syllabus and identify linked resources that still require reading.", courseInput, async (a, ctx) => {
+    const c = ctx.client(); const path = coursePath(a.course_id); const row = await c.getOne<Row>(path, {"include[]": ["syllabus_body"]});
+    return {course_id: a.course_id, course_name: row.name, content_status: typeof row.syllabus_body === "string" ? "retrieved" : "not_returned", omission: typeof row.syllabus_body === "string" ? null : "Syllabus body was not returned; do not infer an empty syllabus.", ...extractContent(row.syllabus_body ?? "", source(c, path + "/assignments/syllabus"), c.baseUrl)};
+  }),
+  define("get_announcements", "Read announcements for one explicit course. Includes source URLs and external-link gaps.", courseInput, async (a, ctx) => {
+    const c = ctx.client(); const path = coursePath(a.course_id);
+    const rows = await c.getAll<Row>(path + "/discussion_topics", {only_announcements: "true"});
+    return {announcements: rows.map(v => record(c, v, source(c, path + "/discussion_topics/" + v.id), "message")), complete: true};
+  }),
+  define("list_modules", "List a course's module structure. Call list_module_items for contents.", courseInput, async (a, ctx) => {
+    const c = ctx.client(); const rows = await c.getAll<Row>(coursePath(a.course_id) + "/modules");
+    return {modules: rows.map(v => record(c, v, source(c, coursePath(a.course_id) + "/modules/" + v.id))), complete: true};
+  }),
+  define("list_module_items", "Read module items including external URLs and content metadata. Linked content is not automatically fetched.", courseInput.extend({module_id: id}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const rows = await c.getAll<Row>(coursePath(a.course_id) + "/modules/" + a.module_id + "/items", {"include[]": ["content_details"]});
+    return {items: rows.map(v => record(c, v, source(c, coursePath(a.course_id) + "/modules/items/" + v.id))), complete: true};
+  }),
+  define("list_pages", "List Canvas pages visible in a course. Bodies require get_page.", courseInput, async (a, ctx) => {
+    const c = ctx.client(); const rows = await c.getAll<Row>(coursePath(a.course_id) + "/pages");
+    return {pages: rows.map(v => ({...record(c, v, source(c, coursePath(a.course_id) + "/pages/" + encodeURIComponent(v.url))), page_slug: v.url})), complete: true};
+  }),
+  define("get_page", "Read a Canvas page body with provenance and a manifest of linked resources.", courseInput.extend({page_slug: z.string().min(1).max(200).regex(/^[a-zA-Z0-9_-]+$/)}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const path = coursePath(a.course_id) + "/pages/" + encodeURIComponent(a.page_slug);
+    return record(c, await c.getOne<Row>(path), source(c, path), "body");
+  }),
+  define("list_course_files", "List visible course file metadata. Does not download files or claim to have read their contents.", courseInput, async (a, ctx) => {
+    const c = ctx.client(); const rows = await c.getAll<Row>(coursePath(a.course_id) + "/files");
+    return {files: rows.map(v => record(c, v, source(c, coursePath(a.course_id) + "/files/" + v.id))), content_status: "metadata_only", next_action: "Read the file through an authorized browser or file connector before using its contents.", complete: true};
+  }),
+  define("get_file", "Read Canvas file metadata, access restrictions, and a canonical source link. File contents remain unread.", z.object({file_id: id}).strict(), async (a, ctx) => {
+    const c = ctx.client(); const row = await c.getOne<Row>("/files/" + a.file_id);
+    return {...record(c, row, source(c, "/files/" + a.file_id)), content_status: "metadata_only", next_action: "Read this file through an authorized browser or file connector."};
+  }),
+  define("get_course_context", "Collect a bounded course context map with syllabus, assignments, modules/items, page index, files, and explicit inaccessible or unread material. This is not all course content.", courseInput, (a, ctx) => getCourseContext(ctx.client(), a.course_id)),
+  define("poll_course_updates", "Compare assignments and announcements with this server's in-memory baseline. First call establishes baseline; later calls report changes. Call-driven, no background notifications; state resets on restart.", courseInput, (a, ctx) => ctx.feed.poll(ctx.client(), a.course_id), true),
+  define("describe_capabilities", "Describe implemented tools and the planned integration boundaries. No Canvas credentials required.", z.object({}).strict(), () => ({
+    version: VERSION, mode: "read-only Canvas pilot", tools: tools.map(t => t.name),
+    transports: ["stdio", "authenticated loopback Streamable HTTP development transport"],
+    limitations: ["No hosted OAuth or ChatGPT installation yet", "No write tools in v2 alpha", "No file extraction or external connector retrieval", "Notifications are call-driven and in-memory", "API inventory is discovery metadata, not executable tool coverage"],
+    source: "https://github.com/Aadi-FTC-12868/canvas-mcp"
+  })),
+  define("search_api_catalog", "Search the source-derived Canvas API map. Results describe endpoints; they do not grant access or execute arbitrary requests.", z.object({query: z.string().min(2).max(120), limit: z.number().int().min(1).max(30).default(10)}).strict(), (a) => {
+    const catalog = JSON.parse(readFileSync(fileURLToPath(new URL("../docs/generated/canvas-inventory.json", import.meta.url)), "utf8"));
+    const rows: Row[] = catalog.endpoints ?? catalog.operations ?? [];
+    const terms = a.query.toLowerCase().split(/\s+/);
+    const matches = rows.filter(v => terms.every(term => JSON.stringify(v).toLowerCase().includes(term)));
+    return {matches: matches.slice(0, a.limit), total_matches: matches.length, inventory_only: true, provenance: {upstream: catalog.upstream, revision: catalog.source_revision}, limitations: catalog.limitations};
+  })
+];
 
-/**
- * Get recent announcements for one or all courses.
- */
-export async function handleGetAnnouncements(
-  client: CanvasClient,
-  args: { course_id?: string; limit?: number }
-): Promise<AnnouncementItem[]> {
-  const limit = args.limit ?? 10;
-
-  let courseIds: string[];
-  let courseNameMap: Record<string, string> = {};
-
-  if (args.course_id) {
-    courseIds = [args.course_id];
-    courseNameMap[args.course_id] = args.course_id;
-    // Try to get course name
-    try {
-      const courses = await client.listCourses();
-      const course = courses.find((c) => String(c.id) === args.course_id);
-      if (course) courseNameMap[args.course_id] = course.name;
-    } catch {
-      // Best effort
-    }
-  } else {
-    const courses = await client.listCourses();
-    courseIds = courses.map((c) => String(c.id));
-    for (const c of courses) {
-      courseNameMap[String(c.id)] = c.name;
-    }
-  }
-
-  if (courseIds.length === 0) return [];
-
-  const announcements = await client.getAnnouncements(courseIds, limit);
-
-  return announcements.slice(0, limit).map((a) => {
-    // Extract course_id from context_code like "course_12345"
-    const codeMatch = a.context_code?.match(/^course_(\d+)$/);
-    const cId = codeMatch ? codeMatch[1] : "";
-    return {
-      title: a.title,
-      message: stripHtml(a.message),
-      posted_date: a.posted_at,
-      author: a.author?.display_name ?? "Unknown",
-      course_name: courseNameMap[cId] ?? cId,
-    };
-  });
+export function createContext(clientFactory: () => CanvasClient = () => new CanvasClient()): ToolContext {
+  let client: CanvasClient | undefined;
+  return {client: () => client ??= clientFactory(), feed: new CourseChangeFeed()};
 }
-
-/**
- * Get the syllabus for a course as plain text.
- */
-export async function handleGetSyllabus(
-  client: CanvasClient,
-  args: { course_id: string }
-): Promise<SyllabusResult> {
-  const course = await client.getSyllabus(args.course_id);
-  return {
-    course_name: course.name,
-    syllabus: stripHtml(course.syllabus_body) || "No syllabus available for this course.",
-  };
-}
-
-/**
- * Submit an assignment (text entry or file upload).
- */
-export async function handleSubmitAssignment(
-  client: CanvasClient,
-  args: {
-    course_id: string;
-    assignment_id: string;
-    submission_type: "online_text_entry" | "online_upload";
-    body?: string;
-    file_path?: string;
-  }
-): Promise<SubmissionResult> {
-  if (args.submission_type === "online_upload" && !args.file_path) {
-    throw new Error('file_path is required for submission_type "online_upload".');
-  }
-  if (args.submission_type === "online_text_entry" && !args.body) {
-    throw new Error('body is required for submission_type "online_text_entry".');
-  }
-
-  let fileIds: number[] | undefined;
-
-  if (args.submission_type === "online_upload" && args.file_path) {
-    const fileId = await client.uploadSubmissionFile(
-      args.course_id,
-      args.assignment_id,
-      args.file_path
-    );
-    fileIds = [fileId];
-  }
-
-  const result = await client.submitAssignment(
-    args.course_id,
-    args.assignment_id,
-    args.submission_type,
-    args.body,
-    fileIds
-  );
-
-  return {
-    submission_id: String(result.id),
-    submitted_at: result.submitted_at,
-    status: result.workflow_state,
-  };
-}
-
-/**
- * Upload a file to a Canvas course's files area.
- */
-export async function handleUploadFile(
-  client: CanvasClient,
-  args: { course_id: string; file_path: string; folder_path?: string }
-): Promise<FileUploadResult> {
-  const result = await client.uploadFile(args.course_id, args.file_path, args.folder_path);
-  return {
-    file_id: String(result.id),
-    filename: result.filename,
-    url: result.url,
-  };
-}
-
-/**
- * Download a Canvas file to the local filesystem.
- */
-export async function handleDownloadFile(
-  client: CanvasClient,
-  args: { file_id: string; save_path?: string }
-): Promise<FileDownloadResult> {
-  const result = await client.downloadFile(args.file_id, args.save_path);
-  return {
-    local_path: result.localPath,
-    file_size: result.size,
-  };
-}
-
-/**
- * List all files in a Canvas course, optionally filtered by folder.
- */
-export async function handleListCourseFiles(
-  client: CanvasClient,
-  args: { course_id: string; folder_path?: string }
-): Promise<FileItem[]> {
-  let folderId: string | undefined;
-
-  if (args.folder_path) {
-    const folder = await client.findFolder(args.course_id, args.folder_path);
-    if (!folder) {
-      throw new Error(`Folder "${args.folder_path}" not found in course ${args.course_id}.`);
-    }
-    folderId = String(folder.id);
-  }
-
-  const files = await client.listCourseFiles(args.course_id, folderId);
-  return files.map((f) => ({
-    id: String(f.id),
-    filename: f.display_name || f.filename,
-    size: f.size,
-    content_type: f["content-type"],
-    created_date: f.created_at,
-    download_url: f.url,
-  }));
-}
-
-/**
- * Get upcoming assignment deadlines across all active courses.
- * Composite tool: fetches courses, then assignments for each, filters and sorts.
- */
-export async function handleGetUpcomingDeadlines(
-  client: CanvasClient,
-  args: { days_ahead?: number }
-): Promise<UpcomingDeadlineItem[]> {
-  const daysAhead = args.days_ahead ?? 14;
-  const now = new Date();
-  const cutoff = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
-
-  const courses = await client.listCourses();
-  const results: UpcomingDeadlineItem[] = [];
-
-  // Fetch assignments for all courses in parallel
-  const assignmentFetches = courses.map(async (course) => {
-    try {
-      const assignments = await client.getAssignments(String(course.id));
-      for (const a of assignments) {
-        if (!a.due_at) continue;
-        const dueDate = new Date(a.due_at);
-        if (dueDate >= now && dueDate <= cutoff) {
-          results.push({
-            assignment_name: a.name,
-            course_name: course.name,
-            due_date: a.due_at,
-            points_possible: a.points_possible,
-            submitted:
-              a.submission?.workflow_state !== undefined &&
-              a.submission.workflow_state !== "unsubmitted",
-          });
-        }
-      }
-    } catch {
-      // Skip courses that can't be fetched (e.g., restricted access)
-    }
-  });
-
-  await Promise.all(assignmentFetches);
-
-  // Sort by due date ascending
-  results.sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
-  return results;
+export async function invokeTool(name: string, args: unknown, context: ToolContext) {
+  const tool = tools.find(t => t.name === name);
+  if (!tool) throw new CanvasError("unknown_tool", "Unknown or unavailable tool. Write and download tools from v1 are not available in this alpha.");
+  const value = await tool.invoke(args, context);
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > 2 * 1024 * 1024) throw new CanvasError("tool_result_limit", "Result exceeded 2 MiB. Use a narrower individual tool; this result was not returned.");
+  return value;
 }

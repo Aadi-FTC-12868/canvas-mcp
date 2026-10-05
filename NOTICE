@@ -1,0 +1,14 @@
+Canvas MCP
+Copyright (c) 2026 Aadi-FTC-12868 and contributors.
+
+This project is an independent integration with Canvas LMS. It is not affiliated with or endorsed by Instructure, OpenAI, or Anthropic.
+
+Canvas LMS source and API annotations used to build the capability inventory:
+https://github.com/instructure/canvas-lms
+Reference revision: 1c9f0bb8013ed69c4f2efe11fd483025469b7e6c
+Canvas LMS copyright belongs to Instructure, Inc. and its contributors.
+Canvas LMS is licensed under GNU Affero General Public License version 3.
+Source-derived inventory entries retain links to the upstream source.
+The AGPLv3 license text is reproduced in LICENSE.
+
+The MCP transport, context adapters, and CLI are maintained separately from Canvas LMS. Dependency licenses remain their respective authors' licenses; see the locked package metadata. Product names identify compatibility, not endorsement.

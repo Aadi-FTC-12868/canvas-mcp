@@ -1,62 +1,46 @@
-# Canvas MCP Server
+# Canvas MCP
 
-Connect Claude to your Canvas LMS. Once set up, Claude can read your courses, assignments, announcements, and syllabi — and even submit assignments and manage files — directly from Claude Desktop or Claude Code.
+An open-source Canvas LMS integration for MCP clients and CLI agents. The v2 alpha is a working, local, read-only foundation with a source-derived map of the wider Canvas application.
 
----
+**Status:** implemented and tested with synthetic data. Not yet live-tested against a school, deployed as a ChatGPT plugin, or equipped with hosted OAuth and background push delivery.
 
-## What you need
+## Two repositories
 
-- **Node.js 18 or later** — check with `node --version`, download from [nodejs.org](https://nodejs.org) if needed
-- A **Canvas account** at your institution (any school that uses Canvas LMS)
-- **Claude Desktop** or **Claude Code** (VS Code extension)
+- [canvas-mcp](https://github.com/Aadi-FTC-12868/canvas-mcp): this standalone TypeScript integration; shared by Codex, Claude and other contributors.
+- [canvas-lms](https://github.com/Aadi-FTC-12868/canvas-lms): reference fork of the full Instructure application. No Rails installation is required to run this MCP.
 
----
+Work for this alpha is on `codex/agent-platform-foundation`. The existing v1 remains on `main` until review. v2 intentionally changes response shapes and removes submission, upload, filesystem download and aggregate-deadline tools; see [migration notes](docs/architecture.md).
 
-## Step 1 — Get your Canvas API token
+## Start locally
 
-1. Log in to your institution's Canvas (e.g. `https://yourschool.instructure.com`)
-2. Click your **profile picture / avatar** in the top-left corner
-3. Go to **Settings**
-4. Scroll down to **Approved Integrations**
-5. Click **+ New Access Token**
-6. Give it a name like `Claude MCP` and click **Generate Token**
-7. **Copy the token now** — Canvas will never show it again
+Requires Node.js 22 or newer. Python 3 is needed only to regenerate the source inventory.
 
-> Your Canvas URL is the domain your school uses. If you log in at `canvas.university.edu`, that's your base URL.
-
----
-
-## Step 2 — Install and build
-
-```bash
-# Clone the repo
-git clone https://github.com/YOUR_USERNAME/canvas-mcp.git
+```sh
+git clone --branch codex/agent-platform-foundation https://github.com/Aadi-FTC-12868/canvas-mcp.git
 cd canvas-mcp
-
-# Install dependencies
-npm install
-
-# Build
+npm ci --ignore-scripts
 npm run build
+npm test
 ```
 
-That's it. This creates `dist/index.js` which is the server Claude will run.
+Discovery and API-map search work without credentials:
 
----
-
-## Step 3 — Connect to Claude
-
-You need to tell Claude where the server is and give it your token. Pick the client you use:
-
-### Claude Desktop
-
-Open (or create) this file:
-```
-~/Library/Application Support/Claude/claude_desktop_config.json        ← Mac
-%APPDATA%\Claude\claude_desktop_config.json                            ← Windows
+```sh
+node dist/cli.js tools
+node dist/cli.js call describe_capabilities '{}'
+node dist/cli.js call search_api_catalog '{"query":"assignments", "limit":5}'
 ```
 
-Add the `mcpServers` block. If the file already has content, merge it in:
+For live reads, copy `.env.example` to `.env` and configure your own Canvas HTTPS origin and development token locally. Do not paste credentials into chat or tool arguments. The normal school-wide onboarding target is browser OAuth with an institution-approved developer key; that flow is planned, not implemented.
+
+```sh
+node dist/cli.js call get_profile '{}'
+node dist/cli.js call get_course_context '{"course_id":"123"}'
+```
+
+## Connect an MCP client
+
+Run `node /absolute/path/to/canvas-mcp/dist/index.js` as a stdio server. Use the client's secret/environment configuration for `CANVAS_BASE_URL` and `CANVAS_API_TOKEN`. Example configuration shape (replace the path and placeholders locally):
 
 ```json
 {
@@ -65,100 +49,65 @@ Add the `mcpServers` block. If the file already has content, merge it in:
       "command": "node",
       "args": ["/absolute/path/to/canvas-mcp/dist/index.js"],
       "env": {
-        "CANVAS_API_TOKEN": "your_token_here",
-        "CANVAS_BASE_URL": "https://yourschool.instructure.com"
+        "CANVAS_BASE_URL": "https://your-school.instructure.com",
+        "CANVAS_API_TOKEN": "SET_LOCALLY_DO_NOT_COMMIT"
       }
     }
   }
 }
 ```
 
-Replace:
-- `/absolute/path/to/canvas-mcp` → the folder where you cloned this repo (e.g. `/Users/yourname/canvas-mcp`)
-- `your_token_here` → the token you copied in Step 1
-- `https://yourschool.instructure.com` → your institution's Canvas URL
+Host-specific configuration locations differ. The portable server requires no LLM API key. Claude-specific packaging can be maintained in Claude against this shared contract.
 
-**Quit Claude Desktop fully and reopen it** after saving.
+A Streamable HTTP development endpoint is also available: set a separate random `MCP_LOCAL_SECRET` of at least 32 characters, then `npm run start:http`. It listens only at `http://127.0.0.1:3000/mcp`, requires `Authorization: Bearer <MCP_LOCAL_SECRET>`, and rejects browser origins. **Do not publicly proxy this single-user pilot.** See [ChatGPT integration requirements](integrations/chatgpt/README.md) for the separate hosted OAuth work.
 
-### Claude Code (VS Code)
+## Implemented tools
 
-Create or edit `~/.claude/mcp.json` (global, works in all projects):
+| Area | Tools |
+| --- | --- |
+| Identity and courses | `get_profile`, `list_courses` |
+| Assignment context | `get_assignments`, `get_assignment_detail`, `get_syllabus` |
+| Announcements | `get_announcements` |
+| Structure and pages | `list_modules`, `list_module_items`, `list_pages`, `get_page` |
+| File metadata | `list_course_files`, `get_file` |
+| Course map | `get_course_context` |
+| Local change observation | `poll_course_updates` |
+| Discovery | `describe_capabilities`, `search_api_catalog` |
 
-```json
-{
-  "mcpServers": {
-    "canvas": {
-      "command": "node",
-      "args": ["/absolute/path/to/canvas-mcp/dist/index.js"],
-      "env": {
-        "CANVAS_API_TOKEN": "your_token_here",
-        "CANVAS_BASE_URL": "https://yourschool.instructure.com"
-      }
-    }
-  }
-}
+All Canvas calls are reads. The polling tool updates local observation state, and its annotations reflect that. Lists either finish within limits or return an explicit error. Composite course context reports failures by section and always identifies itself as partial.
+
+Descriptions retain linked-resource manifests: Google/Microsoft documents need their own authorized connector; LTI may need a browser; file metadata does not imply file contents were read. Returned source text is marked as untrusted material.
+
+`poll_course_updates` establishes a silent first baseline, then reports changed assignments/announcements while the same server process remains alive. It does not run in the background, survive a restart, or wake ChatGPT. Separate CLI calls start fresh processes. Durable event ingestion, scheduling and host-specific delivery are the next layer.
+
+## Canvas application map
+
+The pinned reference revision is `1c9f0bb8013ed69c4f2efe11fd483025469b7e6c`. The map contains **837 documented controller actions across 142 named API groups**, 1,365 static route records, 28 GraphQL query roots, 103 mutation roots, and 78 event definitions.
+
+- [Application and domain map](docs/canvas-application-map.md)
+- [Inventory summary and gaps](docs/generated/inventory-summary.md)
+- [Machine-readable inventory](docs/generated/canvas-inventory.json)
+- [Endpoint review worksheet](docs/generated/documented-endpoints.csv)
+- [Integration architecture and migration](docs/architecture.md)
+- [Authentication, QR login, events and licensing research](docs/authentication-and-events.md)
+- [Implementation roadmap](docs/roadmap.md)
+
+The inventory is not 837 implemented tools. Static analysis leaves 55 documented actions without a route match, 109 route records unresolved, and one unclassified API annotation. Some actions have no named group. Runtime plugins, conditions, roles, feature flags and deployed versions still need validation. Canvas's own Rails OpenAPI task is the planned runtime cross-check.
+
+Regenerate deterministically from the reference checkout:
+
+```sh
+python3 scripts/inventory_canvas.py --source '/path/to/canvas-lms' --output docs/generated
 ```
 
-Then restart Claude Code (`Cmd+Shift+P` → "Claude Code: Restart").
+## Testing and limits
 
----
+`npm test` builds TypeScript and runs offline tests for credential isolation, pagination, rate limits, external-link handling, partial context, change detection, schema validation and real stdio/HTTP MCP handshakes. No live student data or credentials are in the fixtures. CI checks Node 22 and 24.
 
-## Step 4 — Verify it works
+Defaults: 10 API pages / 1,000 items per list, 4 MiB per API response, 15-second request timeout, and 2 MiB per tool result. Course context shows at most 100 rows per section and fetches items from at most 10 modules. Every truncation is reported. Returned course text and links must not be treated as agent instructions.
 
-Ask Claude:
+## License and attribution
 
-> "List my Canvas courses"
+AGPL-3.0-only; see [LICENSE](LICENSE) and [NOTICE](NOTICE). The generated map comes from Instructure's AGPLv3 Canvas source and retains pinned source citations. This project is independently maintained and is not endorsed by Instructure, OpenAI or Anthropic.
 
-If everything is connected, Claude will call the `list_courses` tool and return your active courses.
-
----
-
-## What Claude can do
-
-| Ask Claude to... | Tool used |
-|---|---|
-| "List my courses" | `list_courses` |
-| "What assignments are due this week?" | `get_upcoming_deadlines` |
-| "Show me the assignments for Biology" | `get_assignments` |
-| "What's the rubric for the essay?" | `get_assignment_detail` |
-| "Any new announcements?" | `get_announcements` |
-| "What's the syllabus for CS101?" | `get_syllabus` |
-| "Submit my essay for assignment 456" | `submit_assignment` |
-| "Upload this file to my course" | `upload_file` |
-| "Download file ID 789" | `download_file` |
-| "What files are in my course?" | `list_course_files` |
-
----
-
-## Troubleshooting
-
-**Claude doesn't seem to have Canvas tools**
-- Make sure you fully quit and reopened Claude Desktop (not just closed the window)
-- Double-check the path to `dist/index.js` is correct and absolute
-- Make sure you ran `npm run build` — the `dist/` folder must exist
-
-**"401 Unauthorized" error**
-- Your token is invalid or expired — generate a new one in Canvas → Settings → Approved Integrations
-
-**"403 Forbidden" error**
-- Your token is valid but doesn't have access to that course or resource
-
-**"404 Not Found" error**
-- The course ID or assignment ID doesn't exist — use `list_courses` first to get valid IDs
-
-**Wrong Canvas URL**
-- Make sure `CANVAS_BASE_URL` matches your institution exactly (no trailing slash)
-- Example: `https://canvas.university.edu` not `https://canvas.university.edu/`
-
-**Node.js not found**
-- Install Node.js 18+ from [nodejs.org](https://nodejs.org)
-- On Mac with Homebrew: `brew install node`
-
-**"Cannot find module" error**
-- Run `npm install` then `npm run build` again from the `canvas-mcp` directory
-
----
-
-## Security note
-
-Your API token gives read/write access to your Canvas account. Keep it out of version control. Never paste it into a public place. The `dist/` folder and any `.env` files are excluded from this repo by `.gitignore`.
+Free distribution and credit alone do not replace license obligations. Before distribution or hosting, preserve the required notices and source availability and review dependency licenses. Open-sourcing this server does not authorize publishing private course data or third-party teaching materials.
